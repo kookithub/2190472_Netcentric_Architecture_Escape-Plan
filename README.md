@@ -487,17 +487,16 @@ There are also browser-side tests: a wrong invite key or another website's origi
 
 ## Project Facts (for resume)
 
-Plain facts, each one checked against the code, the test run or a measurement made while writing this README. Anything I could not verify is marked the tag TODO plus "confirm".
+Plain facts, each one checked against the code, the test run or a measurement made while writing this README.
 
 **Course and context**
 
 - Course: 2190472 Netcentric Architecture (from the repository name).
-- Semester, instructor, grade and the original assignment brief: TODO: confirm.
 - The README says Classic mode "follows the assignment's rules exactly"; the assignment text itself is not in the repository.
 
 **Team and contribution**
 
-- Solo or team project: team (team size: TODO: confirm).
+- Solo or team project: team.
 - My contributions: Cloudflare tunnelling for remote play, latency handling and security. In the code these areas are `tunnel.py` (cloudflared quick tunnel), `web.py` (invite key, Origin check, security headers, WebSocket limits), `security.py` (TLS certificate, pinning, message size limit), `protocol.py` (keep-alives, idle timeout, rate limiting) and the timeout/connection-limit parts of `server.py`. Details are in "Remote play, latency and security". The git history has a single commit ("Import Escape Plan project files"), so it cannot show who wrote which part; these areas are as stated by the project owner.
 
 **Languages, frameworks, libraries**
@@ -558,7 +557,7 @@ Plain facts, each one checked against the code, the test run or a measurement ma
 | Classic starts that were forced wins with the old dealing | 40% prisoner, 9% warder (waiting allowed) | Balance section (author's recorded run) |
 | Night keys that were dead ends or single-cut before the fix | 26%, plus 18% watchable from one lantern spot | Balance section (author's recorded run) |
 
-I did not re-run `tools/balance.py`; the balance numbers are the ones recorded in this README by the project author. Load tests, latency measurements and a count of real playtesters: TODO: confirm.
+I did not re-run `tools/balance.py`; the balance numbers are the ones recorded in this README by the project author.
 
 **Hard problems and how they were solved**
 
@@ -572,4 +571,3 @@ I did not re-run `tools/balance.py`; the balance numbers are the ones recorded i
 **Outcome**
 
 - The project runs end to end (server, desktop clients, browser client) and all 130 tests pass in the environment used here.
-- Grade, demo result, deployment or users: TODO: confirm.
