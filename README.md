@@ -1,27 +1,195 @@
 # Escape Plan
 
-A two-player hide-and-chase game over TCP sockets. One player is the warder, the other is the prisoner. The prisoner wins by reaching the tunnel, and the warder wins by catching the prisoner first.
+A real-time, two-player hide-and-chase game built for the course **2190472 Netcentric Architecture**. One player is the warder and the other is the prisoner. The prisoner wins by reaching the tunnel, and the warder wins by catching the prisoner first. A server-authoritative Python TCP server runs the match; players join from a Tkinter desktop client over TLS (with certificate pinning) or from any browser (including phones) through a WebSocket link.
 
-Written in Python 3.9+ with Tkinter, and runs on Windows and macOS. All traffic between the client and server is encrypted with TLS.
+![A Classic match: the prisoner's view](docs/images/classic-gameplay.png)
 
-## Files
+*Screenshots in this README were captured from the real server and clients running under a virtual display, with two scripted Scout-driven players (see "Results and outputs").*
 
-| File | What it does |
+## Contents
+
+1. [Features](#features)
+2. [Tech stack](#tech-stack)
+3. [Architecture](#architecture)
+4. [How it works](#how-it-works)
+5. [Results and outputs](#results-and-outputs)
+6. [Setup and running](#setup-once-on-every-computer)
+7. [Game rules](#how-to-play)
+8. [Security](#security)
+9. [Balance and tests](#balance)
+10. [Repository structure](#repository-structure)
+11. [Project Facts (for resume)](#project-facts-for-resume)
+
+## Features
+
+- Two game modes: **Classic** (5x5, the assignment rules) and **Night Escape** (10x10 fog of war, a key, items, lock-on grab, footprints, lockdown).
+- Server-authoritative game engine: every move is validated on the server, and each player only receives the part of the state they are allowed to see.
+- TLS 1.2+ (TLS 1.3 negotiated here) with certificate pinning (certificate file plus SHA-256 fingerprint check), input size and rate limits, handshake, join and idle timeouts, a connection cap.
+- Browser play through a hand-written HTTP + WebSocket (RFC 6455) server on plain sockets, published through a Cloudflare quick tunnel, protected by a secret invite key, an Origin check and strict security headers.
+- Lobby with live "who is online" updates, side picking, rematch voting, 10-second turn timer with automatic random step.
+- Server dashboard (Tkinter): connected clients, live mini-map, mode switch, reset, swap sides, invite link and QR code.
+- Exact game solvers (retrograde analysis) used to deal fair starts, and "Scout", a hint helper built on breadth-first search plus the exact solver.
+- Bot-vs-bot balance simulator (`tools/balance.py`) that was used to tune the rules.
+
+## Tech stack
+
+| Area | What is used |
 | --- | --- |
-| `server.py` | Socket server + dashboard window (who's online, live map, reset button) |
-| `client.py` | Player window: nickname screen, board, timer, Scout hints, rematch |
-| `game.py` | Game rules: map generation, turns, timer, win checks, scores |
-| `ai.py` | Scout, the hint helper (breadth-first search, plus the exact solver in Classic) |
-| `solver.py` | Exact game solvers for Classic and Night Escape, used to deal fair starts |
-| `security.py` | TLS certificate creation and certificate pinning |
-| `web.py` | Hand-written HTTP + WebSocket server for browser players |
-| `web/index.html` | The browser version of the game (works on phones too) |
-| `tunnel.py` | Starts the Cloudflare tunnel that gives you a public invite link |
-| `protocol.py` | JSON-lines messages; one thread per connection |
-| `theme.py` | Colors, fonts, rounded buttons, character drawings |
-| `config.py` | Server IP and port (players never type these) |
-| `requirements.txt` | The Python packages to install with pip (see Setup) |
-| `tools/balance.py` | Bot-vs-bot simulation that reports win rates (not run by the tests) |
+| Language | Python 3.9+ (tested here on 3.12), JavaScript and HTML/CSS for the browser client |
+| Networking | `socket`, `ssl` (TLS), newline-delimited JSON, hand-written WebSocket framing, `select` |
+| Concurrency | `threading` (thread per connection, accept loop, timer loop), `queue.Queue` outboxes, one `RLock` around the game |
+| GUI | Tkinter (client and server dashboard), custom canvas drawings in `theme.py` |
+| Security | `cryptography` (certificate creation, openssl as fallback), `hmac.compare_digest`, `secrets` |
+| Algorithms | Breadth-first search, retrograde game-tree solving, line-of-sight sampling |
+| Tools | `cloudflared` (public HTTPS tunnel), `qrcode[pil]` (invite QR code), `pytest` / `unittest` |
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Desktop["Desktop players"]
+        C1["client.py (Tkinter)"]
+        C2["client.py (Tkinter)"]
+    end
+    subgraph Browser["Browser players"]
+        B1["web/index.html"]
+    end
+    CF["Cloudflare quick tunnel (HTTPS / WSS)"]
+    subgraph Host["Server computer"]
+        TUN["tunnel.py (cloudflared)"]
+        WEB["web.py WebHost (127.0.0.1 only)"]
+        SRV["server.py GameServer (TLS :5050)"]
+        GAME["game.py EscapeGame (rules, state)"]
+        SOL["solver.py / ai.py"]
+        DASH["ServerDashboard (Tkinter)"]
+    end
+    C1 -- "TLS, pinned certificate" --> SRV
+    C2 -- "TLS, pinned certificate" --> SRV
+    B1 -- "WSS" --> CF
+    CF --> TUN
+    TUN --> WEB
+    WEB -- "WebSocketChannel" --> SRV
+    SRV --> GAME
+    GAME --> SOL
+    SRV --> DASH
+```
+
+Both transports (TLS socket and WebSocket) expose the same `send / run / close` channel interface (`protocol.Channel` and `web.WebSocketChannel`), so `GameServer` treats desktop and browser players identically.
+
+### Sequence of a match
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant S as GameServer
+    participant G as EscapeGame
+    participant B as Client B
+    A->>S: TLS handshake (pinned certificate)
+    S-->>A: hello (online list, tls version)
+    A->>S: join (nickname, side)
+    S-->>A: welcome
+    B->>S: TLS handshake and join
+    S->>G: add_player, start_match (deal map, roles)
+    S-->>A: state (A's own view)
+    S-->>B: state (B's own view)
+    loop each turn (10 s timer)
+        A->>S: move / catch / item / wait
+        S->>G: validate and apply under the lock
+        S-->>A: state (filtered)
+        S-->>B: state (filtered)
+    end
+    Note over S,G: _timer_loop (every 0.2 s) plays a random step if the turn expires
+    S-->>A: state (finished, winner)
+    A->>S: rematch
+    B->>S: rematch
+    S->>G: start_match (winner is warder)
+```
+
+### Protocol
+
+Every message is one JSON object per line (desktop) or one text WebSocket frame (browser). Messages over 4096 bytes are rejected.
+
+| Direction | `type` | Purpose |
+| --- | --- | --- |
+| client to server | `join` | Choose nickname and preferred side |
+| client to server | `move` | Step in a direction (or `stay` to wait in Night Escape) |
+| client to server | `catch` | Warder grabs a target square (Night Escape) |
+| client to server | `item` | Use an item (searchlight, barricade with target, smoke, sprint) |
+| client to server | `side` | Change the preferred side for the next match |
+| client to server | `rematch` | Vote for another match |
+| client to server | `scout` | Ask the server for a hint (used by browser players) |
+| client to server | `quit` | Leave |
+| both | `ping` | Keep-alive (desktop client sends one every 15 s; not passed to the game) |
+| server to client | `hello` | After connection: who is online, TLS version, whether the room is full |
+| server to client | `lobby` | Live online list for people still on the name screen |
+| server to client | `welcome` | Nickname accepted |
+| server to client | `state` | Full per-player view of the game, plus an optional message |
+| server to client | `error` | A request was refused |
+| server to client | `scout` | Hint text and suggested direction |
+
+That is 15 distinct message types (8 client requests, 6 server messages, 1 shared keep-alive), plus an internal `invalid` marker for unparsable input.
+
+### Concurrency and synchronization
+
+- **Threads, not asyncio.** `GameServer` runs an accept loop thread, a timer loop thread and one thread per connection (`_serve` runs `Channel.run`). The web host adds its own accept loop and one thread per HTTP/WebSocket connection. The client uses one network thread plus the Tk main loop.
+- **One lock for the game.** All reads and writes of `EscapeGame` (moves, joins, leaves, timer expiry, snapshots, dashboard actions) happen inside `GameServer.lock`, an `RLock`. The game engine itself is plain single-threaded code, which keeps it easy to test.
+- **One thread owns each socket.** OpenSSL connections must not be read and written by two threads at once. `Channel.run` does both the reading (`select` with a 50 ms tick) and the writing; every other thread only puts encoded messages into the channel's `queue.Queue` outbox. The same design is used for WebSocket connections.
+- **Authoritative state sync.** After every accepted change `broadcast()` builds a separate snapshot for each player under the lock (`EscapeGame.snapshot(viewer_id)`), so hidden information (the prisoner in the dark, the key, other player's item boxes) is never sent. A refused move that still changed state (the turn timed out) is also broadcast.
+- **Turn timer.** `_timer_loop` wakes every 0.2 s, calls `expire_turn()` under the lock and broadcasts only when the status, the player on turn or the displayed seconds changed.
+- **Flood and abuse control.** A token bucket (8 messages per second, burst 16) per connection, 4 KB message limit, idle timeout 45 s, name-screen timeout 90 s, TLS handshake timeout 8 s, and at most 8 simultaneous connections.
+- **Client side.** The network thread only pushes messages into a `queue.Queue` inbox; the Tk thread drains it every 60 ms, so the GUI is never touched from another thread. The server dashboard does the same with its event list.
+
+## How it works
+
+1. **Dealing.** Classic maps are generated until a solver check passes (up to 100 tries): every open square reachable, the tunnel has at least 2 entrances, players start an odd walking distance apart and at least 3 steps from each other, and the exact solver (`solver.classic_outcomes`) says neither side has a forced win. Night Escape deals a 10x10 yard, a key with two disjoint routes to the tunnel, and checked boxes.
+2. **Turns.** The warder moves first. Each turn lasts 10 seconds; on timeout the server plays a random legal step (never a wait).
+3. **Visibility.** In Night Escape the line of sight is computed by `solver.clear_line`, which samples the straight line between square centres and refuses to squeeze between two walls touching at a corner. The server and both clients use the same function for the lantern, the prisoner's view and the red grab zone.
+4. **Scout.** `ai.advise` finds a shortest route with BFS. In Classic it ranks each step with the exact solver (take a forced win, avoid a forced loss) and then by walking distance. In Night Escape the prisoner heads for the key, then the tunnel, while staying out of the warder's grab zone; the warder follows footprints. Scout only suggests; it never moves for you.
+5. **Balancing.** `tools/balance.py` plays Scout against Scout through the real engine to measure win rates (see Balance).
+
+## Results and outputs
+
+### Server dashboard
+
+The dashboard shows connected clients with their TLS version, the mode switch, the live mini-map of the current match, the event log, and the certificate fingerprint. (The "cloudflared isn't installed" message appears because the tunnel tool was not installed in the capture environment, and the address shown is that environment's.)
+
+![Server dashboard in Classic mode](docs/images/server-dashboard-classic.png)
+
+![Server dashboard in Night Escape mode](docs/images/server-dashboard-night.png)
+
+### Lobby / name screen
+
+![Desktop client name screen](docs/images/client-name-screen.png)
+
+The browser client is the same game in a web page and also works on a phone:
+
+![Web client name screen](docs/images/web-client.png)
+
+![Web client at phone width](docs/images/web-client-mobile.png)
+
+### Classic gameplay and result screens
+
+The animation below is four frames of one captured match (start, two mid-game moves, the result):
+
+![A Classic match as an animation](docs/images/classic-match.gif)
+
+![Win card (prisoner escaped)](docs/images/classic-win.png)
+
+![Lost card (warder's view)](docs/images/classic-lost.png)
+
+### Night Escape
+
+The warder only sees its lantern (the lit squares) while the prisoner sees the key, the item boxes and a start hint of its own:
+
+![Night Escape, warder's view](docs/images/night-warder-view.png)
+
+![Night Escape, prisoner's view](docs/images/night-prisoner-view.png)
+
+![Night Escape, the warder caught the prisoner](docs/images/night-lost.png)
+
+### Test and measurement output
+
+`pytest -q` on the unmodified repository: **130 passed in about 61 s** (Python 3.12, headless machine, `xvfb-run`). Measured on that machine, averaged over 200 seeds: dealing and starting a Classic match takes about 4.7 ms; a Night Escape match about 82 ms (the table below in "Balance" was recorded by the original author on their own machine and says about 3 ms and 39 ms).
 
 ## Setup (once on every computer)
 
@@ -240,3 +408,115 @@ The tests cover the game rules, Scout, and real TLS connections on localhost. Th
 - that neither side's real network messages leak hidden positions
 
 There are also browser-side tests: a wrong invite key or another website's origin gets a 403, only the game page is served, and a browser player can join, get the game state and pick a side.
+
+## Repository structure
+
+```text
+.
+├── server.py          GameServer (TLS listener, sessions, broadcast, timer) + Tkinter ServerDashboard
+├── client.py          Tkinter player client (name screen, board, timer, Scout, rematch)
+├── game.py            EscapeGame: rules, dealing, turns, visibility, items, scores
+├── solver.py          Exact solvers (retrograde analysis) and line-of-sight (clear_line)
+├── ai.py              Scout hint helper (BFS + exact solver)
+├── protocol.py        Channel: JSON lines over TLS, one thread per connection, token bucket
+├── security.py        Certificate creation, pinning, TLS contexts, limits
+├── web.py             HTTP + WebSocket server on plain sockets, invite key, Origin check
+├── web/index.html     Browser client (HTML, CSS, JavaScript in one file)
+├── tunnel.py          Starts cloudflared and reads the public URL
+├── theme.py           Colors, fonts, rounded buttons, character drawings (Tkinter canvas)
+├── config.py          Server host and ports
+├── tools/balance.py   Bot-vs-bot balance simulation (not run by the tests)
+├── test_*.py          7 test modules (game, night, wait, solver, ai, network, web)
+├── certs/server.crt   Public certificate only (server.key is created on first run and git-ignored)
+├── docs/images/       Screenshots and the GIF used in this README
+└── requirements.txt   cryptography, qrcode[pil], pytest
+```
+
+## Project Facts (for resume)
+
+Plain facts, each one checked against the code, the test run or a measurement made while writing this README. Anything I could not verify is marked the tag TODO plus "confirm".
+
+**Course and context**
+
+- Course: 2190472 Netcentric Architecture (from the repository name).
+- Semester, instructor, grade and the original assignment brief: TODO: confirm.
+- The README says Classic mode "follows the assignment's rules exactly"; the assignment text itself is not in the repository.
+
+**Team and contribution**
+
+- Solo or team project: TODO: confirm.
+- The git history has a single commit ("Import Escape Plan project files", author `kookithub`), so it cannot show who wrote which part. Personal contribution: TODO: confirm.
+
+**Languages, frameworks, libraries**
+
+- Python (standard library: `socket`, `ssl`, `threading`, `queue`, `select`, `json`, `hmac`, `hashlib`, `secrets`, `subprocess`, `dataclasses`, `tkinter`), plus `cryptography`, `qrcode[pil]`, `pytest`.
+- JavaScript, HTML and CSS (single file `web/index.html`, no framework or build step).
+- External tool: `cloudflared` (Cloudflare quick tunnel).
+
+**Size (measured with `wc -l` on tracked files; 24 tracked files)**
+
+| Part | Lines |
+| --- | --- |
+| Python application code (11 files: server, client, game, ai, solver, protocol, security, web, tunnel, theme, config) | 4,642 |
+| Python tests (7 files) | 1,754 |
+| Python tool (`tools/balance.py`) | 140 |
+| Python total | 6,536 |
+| Browser client `web/index.html` | 899 (about 589 JavaScript, 310 HTML/CSS) |
+
+- Message types: 15 distinct (8 client requests, 6 server messages, 1 shared `ping`).
+- Tests: 130 test functions in 7 modules (`test_night` 59, `test_game` 29, `test_solver` 13, `test_network` 12, `test_web` 7, `test_wait` 6, `test_ai` 4). Result of `pytest -q` here: 130 passed in about 61 s.
+
+**Key features**
+
+- Server-authoritative multiplayer game with per-player filtered state (hidden-information handling).
+- TLS with certificate pinning for desktop players; WebSocket (hand-written RFC 6455) plus invite key, Origin check and security headers for browser players.
+- Two modes (Classic 5x5, Night Escape 10x10) with items, key, fog of war, lockdown, side picking, rematch.
+- Fair-start dealing using exact solvers; Scout hint helper; server dashboard; balance simulator.
+
+**Algorithms and design patterns**
+
+- Breadth-first search for routes and distances (`ai.py`, `game.py`).
+- Retrograde analysis (backward induction over all positions) for exact win/lose labels (`solver.classic_outcomes`, `solver.prisoner_forced_wins`).
+- Line-of-sight by sampling at odd multiples of 1/d (`solver.clear_line`), shared by server and clients.
+- Token-bucket rate limiting (`protocol.Channel._allow`, `web.WebSocketChannel._allow`).
+- Producer/consumer queues for outgoing messages and GUI events; a single lock around authoritative state; one thread owns each socket.
+- Common channel interface for two transports (TLS socket, WebSocket); server-authoritative state with per-viewer snapshots; `lru_cache` on the Classic solver table in `ai.py`.
+- Certificate pinning (trust one certificate file and re-check its SHA-256 fingerprint).
+
+**Measurable numbers**
+
+| Item | Value | Source |
+| --- | --- | --- |
+| Players per match | 2 (one shared game on the server) | `game.py`, `server.py` |
+| Simultaneous connections | at most 8 (players plus people on the name screen) | `MAX_CONNECTIONS` in `server.py` |
+| Concurrent matches | 1 (a single shared `EscapeGame`) | `server.py` |
+| Turn time | 10 s | `TURN_SECONDS` |
+| Server timer loop | every 0.2 s | `_timer_loop` |
+| Connection loop select tick | 50 ms | `protocol.py` |
+| Client GUI inbox drain | every 60 ms | `client.py` |
+| Keep-alive | client ping every 15 s, server idle limit 45 s | `protocol.py` |
+| Rate limit | 8 messages per second (burst 16), max message 4,096 bytes | `server.py`, `security.py` |
+| Timeouts | TLS handshake 8 s, name screen 90 s | `server.py` |
+| Board sizes | Classic 5x5 (5 walls), Night 10x10 (20 walls), lockdown after 60 rounds | `game.py` |
+| Deal + start time (measured here, mean of 200 seeds) | Classic about 4.7 ms, Night about 82 ms | measured |
+| Exact Classic solver, one sample 5x5 map (measured here) | about 1 ms per solve, 487 forced-outcome positions | measured |
+| Bot-vs-bot warder win rate, Classic, final rules | 63% | Balance table (author's recorded run) |
+| Bot-vs-bot warder win rate, Night Escape, final rules | 78% over 6,000 games | Balance table (author's recorded run) |
+| Classic starts that were forced wins with the old dealing | 40% prisoner, 9% warder (waiting allowed) | Balance section (author's recorded run) |
+| Night keys that were dead ends or single-cut before the fix | 26%, plus 18% watchable from one lantern spot | Balance section (author's recorded run) |
+
+I did not re-run `tools/balance.py`; the balance numbers are the ones recorded in this README by the project author. Load tests, latency measurements and a count of real playtesters: TODO: confirm.
+
+**Hard problems and how they were solved**
+
+- *Hidden information over the network.* Each player gets a separate snapshot built on the server, and moves in the dark are announced without a direction; tests (`test_network`, `test_night`) check that real messages never carry the hidden position.
+- *Thread safety with TLS sockets.* A single thread reads and writes each socket and other threads use an outbox queue; game state sits behind one `RLock`; the Tk GUI is fed only through queues.
+- *Unfair or lopsided games.* Dealing was changed repeatedly and checked with solvers and bot simulation (see the Balance table), including the parity argument that an even starting distance makes a catch impossible.
+- *Keys the warder could just camp.* The dealer requires two separate routes from the key to the tunnel and rejects keys that one lantern spot can watch.
+- *Browser support without extra dependencies or open ports.* WebSocket framing written by hand; the web server listens on 127.0.0.1 only and is published through an outgoing Cloudflare tunnel with a secret key kept in the URL fragment.
+- *Authenticating the server without a public CA.* Certificate pinning with a fingerprint check.
+
+**Outcome**
+
+- The project runs end to end (server, desktop clients, browser client) and all 130 tests pass in the environment used here.
+- Grade, demo result, deployment or users: TODO: confirm.
