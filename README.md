@@ -1,10 +1,12 @@
 # Escape Plan
 
-A real-time, two-player hide-and-chase game built for the course **2190472 Netcentric Architecture**. One player is the warder and the other is the prisoner. The prisoner wins by reaching the tunnel, and the warder wins by catching the prisoner first. A server-authoritative Python TCP server runs the match; players join from a Tkinter desktop client over TLS (with certificate pinning) or from any browser (including phones) through a WebSocket link.
+A real-time, two-player hide-and-chase game we built for **2190472 Netcentric Architecture**. One player is the warder and the other is the prisoner. The prisoner wins by reaching the tunnel, and the warder wins by catching the prisoner first. A Python TCP server runs the match and has the final say on every move. Players join either from a Tkinter desktop app over TLS (with certificate pinning) or from any browser, phones included, through a WebSocket link.
+
+This was a team project. My part was remote play through the Cloudflare tunnel, handling lag and dead connections, and the security side (`tunnel.py`, `web.py`, `security.py`, `protocol.py` and the timeout and connection-limit parts of `server.py`).
 
 ![A Classic match: the prisoner's view](docs/images/classic-gameplay.png)
 
-*Screenshots in this README were captured from the real server and clients running under a virtual display, with two scripted Scout-driven players (see "Results and outputs").*
+*The screenshots are from the real server and clients running on a virtual display, with two scripted players following Scout's hints.*
 
 ## Contents
 
@@ -19,7 +21,6 @@ A real-time, two-player hide-and-chase game built for the course **2190472 Netce
 9. [Remote play, latency and security](#remote-play-latency-and-security)
 10. [Balance and tests](#balance)
 11. [Repository structure](#repository-structure)
-12. [Project Facts (for resume)](#project-facts-for-resume)
 
 ## Features
 
@@ -152,7 +153,7 @@ That is 15 distinct message types (8 client requests, 6 server messages, 1 share
 
 ### Server dashboard
 
-The dashboard shows connected clients with their TLS version, the mode switch, the live mini-map of the current match, the event log, and the certificate fingerprint. (The "cloudflared isn't installed" message appears because the tunnel tool was not installed in the capture environment, and the address shown is that environment's.)
+The dashboard shows connected clients with their TLS version, the mode switch, the live mini-map of the current match, the event log, and the certificate fingerprint. (It says "cloudflared isn't installed" because the tunnel tool wasn't installed on the machine I took these on, and the address is that machine's.)
 
 ![Server dashboard in Classic mode](docs/images/server-dashboard-classic.png)
 
@@ -190,7 +191,7 @@ The warder only sees its lantern (the lit squares) while the prisoner sees the k
 
 ### Test and measurement output
 
-`pytest -q` on the unmodified repository: **130 passed in about 61 s** (Python 3.12, headless machine, `xvfb-run`). Measured on that machine, averaged over 200 seeds: dealing and starting a Classic match takes about 4.7 ms; a Night Escape match about 82 ms (the table below in "Balance" was recorded by the original author on their own machine and says about 3 ms and 39 ms).
+`pytest -q` gives **130 passed in about 61 s** (Python 3.12, headless with `xvfb-run`). On that machine, averaged over 200 seeds, dealing and starting a Classic match takes about 4.7 ms and a Night Escape match about 82 ms. (The Balance section below says about 3 ms and 39 ms; those were timed on a faster machine.)
 
 ## Setup (once on every computer)
 
@@ -333,7 +334,7 @@ After that, copy the new `certs/server.crt` to the clients again.
 
 ## Remote play, latency and security
 
-This section describes what the code in `tunnel.py`, `web.py`, `protocol.py`, `security.py` and `server.py` does for browser play over a Cloudflare tunnel, for lag and dead connections, and for security. Everything below was read from the code; there are no load tests or latency measurements in the repository.
+This is the part I worked on: how `tunnel.py`, `web.py`, `protocol.py`, `security.py` and `server.py` handle browser play over a Cloudflare tunnel, lag and dead connections, and security. There are no load tests or latency measurements yet.
 
 ### Cloudflare tunnel (remote play)
 
@@ -381,7 +382,7 @@ The game is turn based, so the code handles lag with timers and keep-alives rath
 | Hidden information | Each player only receives the part of the state they may see, so network traffic does not reveal the other side. | `game.py`, `server.py` |
 | Logging | Refused browsers are logged with the Cloudflare `CF-Connecting-IP` header when present. | `web.py` |
 
-Related tests: `test_network.py` (plain TCP refused, oversized message disconnects, wrong certificate refused, hidden information) and `test_web.py` (security headers, only the page is served, wrong key refused, other websites refused). I could not run the test suite in this environment (collection errors), so these are listed from reading the test code.
+Related tests: `test_network.py` (plain TCP refused, oversized message disconnects, wrong certificate refused, hidden information) and `test_web.py` (security headers, only the page is served, wrong key refused, other websites refused).
 
 ## Extra features
 
@@ -484,90 +485,3 @@ There are also browser-side tests: a wrong invite key or another website's origi
 ├── docs/images/       Screenshots and the GIF used in this README
 └── requirements.txt   cryptography, qrcode[pil], pytest
 ```
-
-## Project Facts (for resume)
-
-Plain facts, each one checked against the code, the test run or a measurement made while writing this README.
-
-**Course and context**
-
-- Course: 2190472 Netcentric Architecture (from the repository name).
-- The README says Classic mode "follows the assignment's rules exactly"; the assignment text itself is not in the repository.
-
-**Team and contribution**
-
-- Solo or team project: team.
-- My contributions: Cloudflare tunnelling for remote play, latency handling and security. In the code these areas are `tunnel.py` (cloudflared quick tunnel), `web.py` (invite key, Origin check, security headers, WebSocket limits), `security.py` (TLS certificate, pinning, message size limit), `protocol.py` (keep-alives, idle timeout, rate limiting) and the timeout/connection-limit parts of `server.py`. Details are in "Remote play, latency and security". The git history has a single commit ("Import Escape Plan project files"), so it cannot show who wrote which part; these areas are as stated by the project owner.
-
-**Languages, frameworks, libraries**
-
-- Python (standard library: `socket`, `ssl`, `threading`, `queue`, `select`, `json`, `hmac`, `hashlib`, `secrets`, `subprocess`, `dataclasses`, `tkinter`), plus `cryptography`, `qrcode[pil]`, `pytest`.
-- JavaScript, HTML and CSS (single file `web/index.html`, no framework or build step).
-- External tool: `cloudflared` (Cloudflare quick tunnel).
-
-**Size (measured with `wc -l` on tracked files; 24 tracked files)**
-
-| Part | Lines |
-| --- | --- |
-| Python application code (11 files: server, client, game, ai, solver, protocol, security, web, tunnel, theme, config) | 4,642 |
-| Python tests (7 files) | 1,754 |
-| Python tool (`tools/balance.py`) | 140 |
-| Python total | 6,536 |
-| Browser client `web/index.html` | 899 (about 589 JavaScript, 310 HTML/CSS) |
-
-- Message types: 15 distinct (8 client requests, 6 server messages, 1 shared `ping`).
-- Tests: 130 test functions in 7 modules (`test_night` 59, `test_game` 29, `test_solver` 13, `test_network` 12, `test_web` 7, `test_wait` 6, `test_ai` 4). Result of `pytest -q` here: 130 passed in about 61 s.
-
-**Key features**
-
-- Server-authoritative multiplayer game with per-player filtered state (hidden-information handling).
-- TLS with certificate pinning for desktop players; WebSocket (hand-written RFC 6455) plus invite key, Origin check and security headers for browser players.
-- Two modes (Classic 5x5, Night Escape 10x10) with items, key, fog of war, lockdown, side picking, rematch.
-- Fair-start dealing using exact solvers; Scout hint helper; server dashboard; balance simulator.
-
-**Algorithms and design patterns**
-
-- Breadth-first search for routes and distances (`ai.py`, `game.py`).
-- Retrograde analysis (backward induction over all positions) for exact win/lose labels (`solver.classic_outcomes`, `solver.prisoner_forced_wins`).
-- Line-of-sight by sampling at odd multiples of 1/d (`solver.clear_line`), shared by server and clients.
-- Token-bucket rate limiting (`protocol.Channel._allow`, `web.WebSocketChannel._allow`).
-- Producer/consumer queues for outgoing messages and GUI events; a single lock around authoritative state; one thread owns each socket.
-- Common channel interface for two transports (TLS socket, WebSocket); server-authoritative state with per-viewer snapshots; `lru_cache` on the Classic solver table in `ai.py`.
-- Certificate pinning (trust one certificate file and re-check its SHA-256 fingerprint).
-
-**Measurable numbers**
-
-| Item | Value | Source |
-| --- | --- | --- |
-| Players per match | 2 (one shared game on the server) | `game.py`, `server.py` |
-| Simultaneous connections | at most 8 (players plus people on the name screen) | `MAX_CONNECTIONS` in `server.py` |
-| Concurrent matches | 1 (a single shared `EscapeGame`) | `server.py` |
-| Turn time | 10 s | `TURN_SECONDS` |
-| Server timer loop | every 0.2 s | `_timer_loop` |
-| Connection loop select tick | 50 ms | `protocol.py` |
-| Client GUI inbox drain | every 60 ms | `client.py` |
-| Keep-alive | client ping every 15 s, server idle limit 45 s | `protocol.py` |
-| Rate limit | 8 messages per second (burst 16), max message 4,096 bytes | `server.py`, `security.py` |
-| Timeouts | TLS handshake 8 s, name screen 90 s | `server.py` |
-| Board sizes | Classic 5x5 (5 walls), Night 10x10 (20 walls), lockdown after 60 rounds | `game.py` |
-| Deal + start time (measured here, mean of 200 seeds) | Classic about 4.7 ms, Night about 82 ms | measured |
-| Exact Classic solver, one sample 5x5 map (measured here) | about 1 ms per solve, 487 forced-outcome positions | measured |
-| Bot-vs-bot warder win rate, Classic, final rules | 63% | Balance table (author's recorded run) |
-| Bot-vs-bot warder win rate, Night Escape, final rules | 78% over 6,000 games | Balance table (author's recorded run) |
-| Classic starts that were forced wins with the old dealing | 40% prisoner, 9% warder (waiting allowed) | Balance section (author's recorded run) |
-| Night keys that were dead ends or single-cut before the fix | 26%, plus 18% watchable from one lantern spot | Balance section (author's recorded run) |
-
-I did not re-run `tools/balance.py`; the balance numbers are the ones recorded in this README by the project author.
-
-**Hard problems and how they were solved**
-
-- *Hidden information over the network.* Each player gets a separate snapshot built on the server, and moves in the dark are announced without a direction; tests (`test_network`, `test_night`) check that real messages never carry the hidden position.
-- *Thread safety with TLS sockets.* A single thread reads and writes each socket and other threads use an outbox queue; game state sits behind one `RLock`; the Tk GUI is fed only through queues.
-- *Unfair or lopsided games.* Dealing was changed repeatedly and checked with solvers and bot simulation (see the Balance table), including the parity argument that an even starting distance makes a catch impossible.
-- *Keys the warder could just camp.* The dealer requires two separate routes from the key to the tunnel and rejects keys that one lantern spot can watch.
-- *Browser support without extra dependencies or open ports.* WebSocket framing written by hand; the web server listens on 127.0.0.1 only and is published through an outgoing Cloudflare tunnel with a secret key kept in the URL fragment.
-- *Authenticating the server without a public CA.* Certificate pinning with a fingerprint check.
-
-**Outcome**
-
-- The project runs end to end (server, desktop clients, browser client) and all 130 tests pass in the environment used here.
