@@ -2,7 +2,7 @@
 
 A real-time, two-player hide-and-chase game we built for **2190472 Netcentric Architecture**. One player is the warder and the other is the prisoner. The prisoner wins by reaching the tunnel, and the warder wins by catching the prisoner first. A Python TCP server runs the match and has the final say on every move. Players join either from a Tkinter desktop app over TLS (with certificate pinning) or from any browser, phones included, through a WebSocket link.
 
-This was a team project. My part was remote play through the Cloudflare tunnel, handling lag and dead connections, and the security side (`tunnel.py`, `web.py`, `security.py`, `protocol.py` and the timeout and connection-limit parts of `server.py`).
+This was a team project, and we worked on all parts of it together. My own focus was remote play through the Cloudflare tunnel, handling lag and dead connections, and the security side (`tunnel.py`, `web.py`, `security.py`, `protocol.py` and the timeout and connection-limit parts of `server.py`).
 
 ![A Classic match: the prisoner's view](docs/images/classic-gameplay.png)
 
@@ -334,7 +334,7 @@ After that, copy the new `certs/server.crt` to the clients again.
 
 ## Remote play, latency and security
 
-This is the part I worked on: how `tunnel.py`, `web.py`, `protocol.py`, `security.py` and `server.py` handle browser play over a Cloudflare tunnel, lag and dead connections, and security. There are no load tests or latency measurements yet.
+This is the part I focused on: how `tunnel.py`, `web.py`, `protocol.py`, `security.py` and `server.py` handle browser play over a Cloudflare tunnel, lag and dead connections, and security. There are no load tests or latency measurements yet.
 
 ### Cloudflare tunnel (remote play)
 
