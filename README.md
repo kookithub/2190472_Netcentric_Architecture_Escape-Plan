@@ -16,9 +16,10 @@ A real-time, two-player hide-and-chase game built for the course **2190472 Netce
 6. [Setup and running](#setup-once-on-every-computer)
 7. [Game rules](#how-to-play)
 8. [Security](#security)
-9. [Balance and tests](#balance)
-10. [Repository structure](#repository-structure)
-11. [Project Facts (for resume)](#project-facts-for-resume)
+9. [Remote play, latency and security](#remote-play-latency-and-security)
+10. [Balance and tests](#balance)
+11. [Repository structure](#repository-structure)
+12. [Project Facts (for resume)](#project-facts-for-resume)
 
 ## Features
 
@@ -330,6 +331,58 @@ python3 security.py --force    # macOS
 
 After that, copy the new `certs/server.crt` to the clients again.
 
+## Remote play, latency and security
+
+This section describes what the code in `tunnel.py`, `web.py`, `protocol.py`, `security.py` and `server.py` does for browser play over a Cloudflare tunnel, for lag and dead connections, and for security. Everything below was read from the code; there are no load tests or latency measurements in the repository.
+
+### Cloudflare tunnel (remote play)
+
+- `tunnel.py` starts `cloudflared tunnel --no-autoupdate --url http://127.0.0.1:<web port>` as a subprocess (a Cloudflare *quick tunnel*, no account or domain configured in the code). It reads the process output and picks out the first `https://<random>.trycloudflare.com` address with a regular expression.
+- The tunnel exposes only the browser web server (`web.py`, default port `WEB_PORT = 5051` in `config.py`, bound to `127.0.0.1`). The desktop TLS game port (`SERVER_PORT = 5050`) is not part of the tunnel.
+- If `cloudflared` is not installed, or the process exits with an error, `tunnel.py` reports it to the dashboard (the Invite link card shows the problem); `stop()` terminates the process, and kills it if it has not exited after 3 seconds.
+- The server dashboard builds the invite link as `<public url>/#key=<secret>` and shows it as text and a QR code (`server.py`).
+
+```mermaid
+flowchart LR
+    B["Browser (laptop or phone)"] -->|"HTTPS / WSS"| CF["Cloudflare edge<br/>*.trycloudflare.com"]
+    CF -->|"tunnel opened outbound by cloudflared"| CD["cloudflared<br/>(tunnel.py)"]
+    CD -->|"HTTP + WebSocket, 127.0.0.1:5051"| W["web.py<br/>invite key, Origin check"]
+    W --> G["GameServer (server.py)<br/>same game as desktop players"]
+    D["Tkinter client"] -->|"TLS + certificate pinning, port 5050"| G
+```
+
+### Latency and connection health
+
+The game is turn based, so the code handles lag with timers and keep-alives rather than prediction or interpolation:
+
+- **Server-authoritative state:** the server validates every move and sends each player a fresh state snapshot after each change. There is no client-side prediction, interpolation or buffering of moves.
+- **Turn clock:** each turn is `TURN_SECONDS = 10` (`game.py`). A timer thread in `server.py` wakes every 0.2 s, expires overdue turns (random legal step) and broadcasts when the turn, status or the remaining whole seconds change, so clocks update about once per second.
+- **Clock smoothing on the clients:** the snapshot carries `turn_seconds_left`. `client.py` and `web/index.html` run their own local countdown (100 ms tick in Tkinter, animation timer in the browser) and only re-sync it when it drifts more than 1 second from the server value or the turn changes.
+- **Keep-alives:** the desktop client sends a `ping` every 15 s (`PING_EVERY`) when it has been quiet; the server sends a WebSocket ping frame to browsers every 15 s, which also keeps the tunnel from treating the connection as idle. Browsers answer automatically; the server also answers client pings with pongs.
+- **Dead connections:** the server closes a connection that has sent nothing for 45 s (`IDLE_LIMIT`), a client that has not chosen a nickname within 90 s (`JOIN_TIMEOUT`), and a connection whose TLS handshake takes longer than 8 s (`HANDSHAKE_TIMEOUT`). The desktop client opens its connection with an 8 s connect timeout (`open_tls`) and 10 s socket timeout.
+- **Non-blocking sends:** each connection runs in one thread; other threads only put messages into an outbox queue, so a slow client does not block game logic or other players (`protocol.py`, `web.py`).
+- **After a drop:** neither client reconnects automatically. They show a "Lost the connection" message; the browser's **Reconnect** button reloads the page, and the desktop client has a retry button for the first connection.
+- **Not in the code:** round-trip time is not measured or displayed anywhere.
+
+### Security measures
+
+| Area | What the code does | Where |
+| --- | --- | --- |
+| Transport encryption | TLS 1.2 or newer on the desktop port; plain TCP is refused. Browsers use HTTPS/WSS through Cloudflare. | `security.py`, `server.py` |
+| Server identity | Self-signed ECDSA P-256 certificate (365 days, `serverAuth`, not a CA); clients trust only that certificate and also compare its SHA-256 fingerprint after the handshake. `server.key` is created locally with mode `0600` and is git-ignored. | `security.py`, `.gitignore` |
+| Invite key | `secrets.token_urlsafe(12)` created per server start, passed in the URL fragment, checked with `hmac.compare_digest` on the WebSocket upgrade; a wrong key gets HTTP 403. | `web.py` |
+| Origin check | A WebSocket upgrade is refused unless the `Origin` host equals the `Host` header. | `web.py` |
+| Minimal web surface | Listens on `127.0.0.1` only, serves only `/` (and `/index.html`) and `/ws`, other paths return 404; request headers are capped at 8 KB. | `web.py` |
+| Response headers | Content-Security-Policy (`default-src 'none'`, `frame-ancestors 'none'`, ...), `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`. | `web.py` |
+| Message limits | Messages over 4096 bytes close the connection; a token bucket allows 8 messages per second with a burst of 16 (`MESSAGES_PER_SECOND = 8`); browser frames must be masked, text, unfragmented and under 4096 bytes. | `security.py`, `protocol.py`, `web.py`, `server.py` |
+| Input validation | Invalid JSON becomes an `invalid` message; unknown message types, move directions and sides are rejected; a player must join before doing anything else; moves are validated by the server. | `protocol.py`, `server.py`, `game.py` |
+| Nickname sanitising | Unicode-normalised, control characters removed, spaces squashed, length capped, duplicates refused; the browser inserts names as plain text, not HTML. | `game.py`, `web/index.html` |
+| Connection cap | At most `MAX_CONNECTIONS = 8` simultaneous connections, for desktop and browser clients combined. | `server.py` |
+| Hidden information | Each player only receives the part of the state they may see, so network traffic does not reveal the other side. | `game.py`, `server.py` |
+| Logging | Refused browsers are logged with the Cloudflare `CF-Connecting-IP` header when present. | `web.py` |
+
+Related tests: `test_network.py` (plain TCP refused, oversized message disconnects, wrong certificate refused, hidden information) and `test_web.py` (security headers, only the page is served, wrong key refused, other websites refused). I could not run the test suite in this environment (collection errors), so these are listed from reading the test code.
+
 ## Extra features
 
 | Feature | AI? |
@@ -444,8 +497,8 @@ Plain facts, each one checked against the code, the test run or a measurement ma
 
 **Team and contribution**
 
-- Solo or team project: TODO: confirm.
-- The git history has a single commit ("Import Escape Plan project files", author `kookithub`), so it cannot show who wrote which part. Personal contribution: TODO: confirm.
+- Solo or team project: team (team size: TODO: confirm).
+- My contributions: Cloudflare tunnelling for remote play, latency handling and security. In the code these areas are `tunnel.py` (cloudflared quick tunnel), `web.py` (invite key, Origin check, security headers, WebSocket limits), `security.py` (TLS certificate, pinning, message size limit), `protocol.py` (keep-alives, idle timeout, rate limiting) and the timeout/connection-limit parts of `server.py`. Details are in "Remote play, latency and security". The git history has a single commit ("Import Escape Plan project files"), so it cannot show who wrote which part; these areas are as stated by the project owner.
 
 **Languages, frameworks, libraries**
 
